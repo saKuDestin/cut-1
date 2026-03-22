@@ -46,12 +46,33 @@
 - [x] 前端：上传页添加钉子风格选择（悬念式/痛点式/利益式）
 - [x] 20个单元测试全部通过
 
-## 智能体功能（v1.4）
-- [ ] 配置DeepSeek API Key到项目环境变量
-- [ ] 后端：DeepSeek流式对话接口（/api/agent/chat，SSE流式返回）
-- [ ] 后端：切片文案重写接口（trpc.agent.rewriteClipCopy，支持自定义指令）
-- [ ] 后端：全局智能体指令解析（品牌人设、限定词、风格偏好持久化）
-- [ ] 前端：全局悬浮AI对话框（侧边栏，支持流式输出，历史记录）
-- [ ] 前端：切片卡片快捷指令按钮（重写标题/换风格/重新生成/加限定词）
-- [ ] 前端：上传页"AI提示词"输入框（为本次任务设置全局限定词）
-- [ ] 测试智能体功能并保存检查点
+## 智能体功能（v1.4）✅ 已完成
+- [x] 配置 DeepSeek API Key 到项目环境变量（`DEEPSEEK_API_KEY`）
+- [x] 后端：DeepSeek 流式对话接口（`/api/agent/chat/stream`，SSE 流式返回）
+- [x] 后端：切片文案重写接口（`trpc.agent.rewriteClipCopy`，支持 11 种内置指令 + 自定义指令）
+- [x] 后端：全局智能体指令解析（品牌人设、限定词、风格偏好持久化到数据库 `users.brandPersona`）
+- [x] 前端：全局悬浮 AI 对话框（侧边栏，SSE 流式逐字输出，支持停止生成，聊天记录持久化最多20条）
+- [x] 前端：切片卡片快捷指令按钮（重写标题/换风格/重新生成/加限定词，`ClipAgentActions` 组件）
+- [x] 前端：上传页"全局提示词"输入框（为本次任务设置全局限定词，自动同步品牌人设）
+- [x] 测试智能体功能并保存检查点
+
+## 平台独立化改造（v1.5）✅ 已完成
+- [x] 存储层：将 Manus Forge Storage 替换为 AWS S3（兼容 Cloudflare R2 / 阿里云 OSS / 腾讯云 COS）
+- [x] 语音转录：将 Forge Whisper 替换为 Groq Whisper API（`whisper-large-v3-turbo`）
+- [x] LLM 层：将 Forge LLM 替换为 DeepSeek API（`deepseek-chat`）
+- [x] 认证层：将 Manus OAuth 替换为账号密码登录 + JWT Cookie 会话（bcrypt 密码哈希）
+- [x] 前端：新增登录页（`/login`）和注册页（`/register`）
+- [x] 数据库：`users` 表新增 `passwordHash` 字段支持本地账号
+- [x] 修复 TiDB Cloud SSL 连接问题（改用 `mysql2.createPool()` 显式传入 SSL 参数）
+- [x] 新增 `.env.example` 配置模板和 `DEPLOY.md` 部署文档
+
+## 功能增强（v1.6）✅ 已完成
+- [x] 后端：任务并发队列（最多 2 个任务同时处理，防止 FFmpeg 进程耗尽内存）
+- [x] 后端：任务软删除接口（`trpc.deleteJob`）
+- [x] 后端：失败任务重试接口（`trpc.retryJob`）
+- [x] 后端：品牌人设持久化接口（`trpc.agent.getBrandPersona` / `clearBrandPersona`）
+- [x] 后端：任务状态精细化同步（`clipping → deduplicating → generating_copy`，每阶段独立更新进度）
+- [x] 前端：历史页新增搜索框（按任务名/产品名）、状态筛选（全部/已完成/失败/处理中）
+- [x] 前端：历史页新增统计概览卡片（总任务数/完成数/失败数）
+- [x] 前端：历史页新增删除按钮（二次确认防误操作）和重试按钮（仅失败任务可用）
+- [x] 数据库：`jobs` 表新增 `globalPrompt`（全局提示词）和 `deletedAt`（软删除时间戳）字段
