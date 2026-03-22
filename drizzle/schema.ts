@@ -16,6 +16,10 @@ export const users = mysqlTable("users", {
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  // 品牌人设持久化（跨设备同步）
+  brandPersona: text("brandPersona"),
+  styleKeywords: json("styleKeywords"), // string[]
+  excludeKeywords: json("excludeKeywords"), // string[]
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -31,6 +35,7 @@ export const jobs = mysqlTable("jobs", {
   title: varchar("title", { length: 255 }),
   productName: varchar("productName", { length: 255 }),
   productKeywords: text("productKeywords"),
+  globalPrompt: text("globalPrompt"), // 本次任务的全局限定词/AI提示词
   originalVideoUrl: text("originalVideoUrl"),
   originalVideoKey: varchar("originalVideoKey", { length: 512 }),
   originalFileName: varchar("originalFileName", { length: 255 }),
@@ -51,6 +56,7 @@ export const jobs = mysqlTable("jobs", {
   errorMessage: text("errorMessage"),
   totalClips: int("totalClips").default(0),
   hookStyle: mysqlEnum("hookStyle", ["suspense", "pain_point", "benefit"]).default("suspense"),
+  deletedAt: timestamp("deletedAt"), // 软删除
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

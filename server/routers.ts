@@ -13,9 +13,19 @@ import {
   getClipsByJobId,
   updateClip,
   getTranscriptByJobId,
+  softDeleteJob,
+  resetJobForRetry,
+  updateUserBrandPersona,
+  getUserById,
 } from "./db";
 import { processJob } from "./jobProcessor";
-import { rewriteClipCopy, parseGlobalInstruction, callDeepSeek, type AgentMessage } from "./agentService";
+import { enqueueJob } from "./jobQueue";
+import {
+  rewriteClipCopy,
+  parseGlobalInstruction,
+  callDeepSeek,
+  type AgentMessage,
+} from "./agentService";
 
 export const appRouter = router({
   system: systemRouter,
@@ -38,7 +48,7 @@ export const appRouter = router({
           productName: z.string().optional(),
           productKeywords: z.string().optional(),
           hookStyle: z.enum(["suspense", "pain_point", "benefit"]).optional(),
-          globalPrompt: z.string().optional(), // 全局提示词/限定词
+          globalPrompt: z.string().optional(),
         })
       )
       .mutation(async ({ input, ctx }) => {
@@ -51,6 +61,7 @@ export const appRouter = router({
           productName: input.productName || "",
           productKeywords: input.productKeywords || "",
           hookStyle: input.hookStyle || "suspense",
+          globalPrompt: input.globalPrompt || "",
           originalVideoKey: key,
           originalFileName: input.fileName,
           originalFileSizeMb: input.fileSize / (1024 * 1024),
@@ -80,7 +91,7 @@ export const appRouter = router({
           progress: 5,
         });
 
-        processJob(input.jobId).catch((err) => {
+        enqueueJob(input.jobId, processJob).catch((err) => {
           console.error(`[Job ${input.jobId}] 处理失败:`, err);
           updateJob(input.jobId, {
             status: "failed",
@@ -102,7 +113,9 @@ export const appRouter = router({
       }),
 
     list: protectedProcedure.query(async ({ ctx }) => {
-      return getJobsByUserId(ctx.user.id);
+      const allJobs = await getJobsByUserId(ctx.user.id);
+      // 过滤掉软删除的任务
+      return allJobs.filter((j) => !(j as any).deletedAt);
     }),
 
     getClips: protectedProcedure
@@ -137,6 +150,54 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const { clipId, ...data } = input;
         await updateClip(clipId, data);
+        return { success: true };
+      }),
+
+    /**
+     * 软删除任务
+     */
+    deleteJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const job = await getJobById(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在" });
+        }
+        // 处理中的任务不允许删除
+        if (!["completed", "failed"].includes(job.status)) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "处理中的任务不能删除，请等待完成后再删除" });
+        }
+        await softDeleteJob(input.jobId);
+        return { success: true };
+      }),
+
+    /**
+     * 重试失败的任务
+     */
+    retryJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const job = await getJobById(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在" });
+        }
+        if (job.status !== "failed") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "只有失败的任务才能重试" });
+        }
+        if (!job.originalVideoUrl) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "原始视频不存在，无法重试" });
+        }
+
+        await resetJobForRetry(input.jobId);
+
+        enqueueJob(input.jobId, processJob).catch((err) => {
+          console.error(`[Job ${input.jobId}] 重试失败:`, err);
+          updateJob(input.jobId, {
+            status: "failed",
+            errorMessage: err.message,
+          });
+        });
+
         return { success: true };
       }),
   }),
@@ -186,7 +247,6 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ input, ctx }) => {
-        // 验证权限
         const job = await getJobById(input.jobId);
         if (!job || job.userId !== ctx.user.id) {
           throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在" });
@@ -198,6 +258,13 @@ export const appRouter = router({
           throw new TRPCError({ code: "NOT_FOUND", message: "切片不存在" });
         }
 
+        // 优先使用传入的 brandPersona，其次从数据库读取用户设置
+        let brandPersona = input.brandPersona;
+        if (!brandPersona) {
+          const user = await getUserById(ctx.user.id);
+          brandPersona = user?.brandPersona || undefined;
+        }
+
         const result = await rewriteClipCopy({
           currentTitle: clip.title || "",
           currentCopy: clip.copywriting || "",
@@ -206,10 +273,9 @@ export const appRouter = router({
           productKeywords: job.productKeywords || "",
           instruction: input.instruction,
           customInstruction: input.customInstruction,
-          brandPersona: input.brandPersona,
+          brandPersona,
         });
 
-        // 保存到数据库
         await updateClip(input.clipId, {
           title: result.title,
           copywriting: result.copywriting,
@@ -246,11 +312,18 @@ export const appRouter = router({
           throw new TRPCError({ code: "NOT_FOUND", message: "任务不存在" });
         }
 
+        // 优先使用传入的 brandPersona，其次从数据库读取
+        let brandPersona = input.brandPersona;
+        if (!brandPersona) {
+          const user = await getUserById(ctx.user.id);
+          brandPersona = user?.brandPersona || undefined;
+        }
+
         const clips = await getClipsByJobId(input.jobId);
+        const completedClips = clips.filter((c) => c.status === "completed");
         let successCount = 0;
 
-        // 逐个处理（避免并发过多请求）
-        for (const clip of clips) {
+        for (const clip of completedClips) {
           try {
             const result = await rewriteClipCopy({
               currentTitle: clip.title || "",
@@ -260,7 +333,7 @@ export const appRouter = router({
               productKeywords: job.productKeywords || "",
               instruction: input.instruction,
               customInstruction: input.customInstruction,
-              brandPersona: input.brandPersona,
+              brandPersona,
             });
 
             await updateClip(clip.id, {
@@ -274,20 +347,55 @@ export const appRouter = router({
           }
         }
 
-        return { success: true, successCount, totalCount: clips.length };
+        return { success: true, successCount, totalCount: completedClips.length };
       }),
 
     /**
-     * 解析全局指令（品牌人设、限定词设置）
+     * 解析全局指令并持久化品牌人设到数据库
      */
     parseGlobalInstruction: protectedProcedure
       .input(z.object({ message: z.string() }))
-      .mutation(async ({ input }) => {
-        return parseGlobalInstruction(input.message);
+      .mutation(async ({ input, ctx }) => {
+        const result = await parseGlobalInstruction(input.message);
+
+        // 持久化品牌人设到数据库
+        if (result.brandPersona) {
+          await updateUserBrandPersona(ctx.user.id, {
+            brandPersona: result.brandPersona,
+            styleKeywords: result.styleKeywords,
+            excludeKeywords: result.excludeKeywords,
+          });
+        }
+
+        return result;
       }),
 
     /**
-     * 通用AI对话（用于侧边栏聊天，非流式，适合短回复）
+     * 获取用户的品牌人设（从数据库读取，跨设备同步）
+     */
+    getBrandPersona: protectedProcedure.query(async ({ ctx }) => {
+      const user = await getUserById(ctx.user.id);
+      return {
+        brandPersona: user?.brandPersona || "",
+        styleKeywords: (user?.styleKeywords as string[]) || [],
+        excludeKeywords: (user?.excludeKeywords as string[]) || [],
+      };
+    }),
+
+    /**
+     * 清除品牌人设
+     */
+    clearBrandPersona: protectedProcedure.mutation(async ({ ctx }) => {
+      await updateUserBrandPersona(ctx.user.id, {
+        brandPersona: "",
+        styleKeywords: [],
+        excludeKeywords: [],
+      });
+      return { success: true };
+    }),
+
+    /**
+     * 通用AI对话（非流式，tRPC mutation）
      */
     chat: protectedProcedure
       .input(
@@ -308,8 +416,15 @@ export const appRouter = router({
             .optional(),
         })
       )
-      .mutation(async ({ input }) => {
-        const { messages, brandPersona, jobContext } = input;
+      .mutation(async ({ input, ctx }) => {
+        const { messages, brandPersona: inputPersona, jobContext } = input;
+
+        // 优先使用传入的，其次从数据库读取
+        let brandPersona = inputPersona;
+        if (!brandPersona) {
+          const user = await getUserById(ctx.user.id);
+          brandPersona = user?.brandPersona || undefined;
+        }
 
         let systemPrompt = `你是直播切片大师的AI助手，专门帮助电商服装商家优化短视频内容。
 

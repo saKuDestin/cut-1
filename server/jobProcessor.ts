@@ -51,7 +51,6 @@ export async function processJob(jobId: number): Promise<void> {
     await updateJob(jobId, { progress: 15 });
     console.log(`[Job ${jobId}] Whisper转录中...`);
     const audioUrl = await uploadTempFileToS3(audioPath, `jobs/${jobId}/audio.mp3`, "audio/mpeg");
-    tempFiles.push(audioPath);
 
     const transcriptResult = await transcribeAudio({
       audioUrl,
@@ -59,7 +58,7 @@ export async function processJob(jobId: number): Promise<void> {
       prompt: "这是一段服装直播带货视频，主播在介绍服装产品的款式、材质、价格和穿搭建议",
     });
 
-    if ('error' in transcriptResult) {
+    if ("error" in transcriptResult) {
       throw new Error(`转录失败: ${transcriptResult.error}`);
     }
 
@@ -83,7 +82,8 @@ export async function processJob(jobId: number): Promise<void> {
     const productSegments = await analyzeProductSegments(
       segments,
       job.productName || "",
-      job.productKeywords || ""
+      job.productKeywords || "",
+      (job as any).globalPrompt || ""
     );
 
     await updateJob(jobId, { status: "clipping", progress: 50, totalClips: productSegments.length });
@@ -93,7 +93,8 @@ export async function processJob(jobId: number): Promise<void> {
 
     for (let i = 0; i < productSegments.length; i++) {
       const seg = productSegments[i];
-      const clipProgress = 50 + Math.floor(((i + 1) / productSegments.length) * 45);
+      // 进度分配：50-60% 切片，60-80% 去重，80-95% 文案生成
+      const baseProgress = 50 + Math.floor((i / productSegments.length) * 45);
 
       // 创建clip记录
       const clip = await createClip({
@@ -106,6 +107,9 @@ export async function processJob(jobId: number): Promise<void> {
         status: "clipping",
       });
 
+      // 同步更新 job 状态到 clipping 阶段
+      await updateJob(jobId, { status: "clipping", progress: baseProgress });
+
       try {
         const clipTempPath = path.join(os.tmpdir(), `clip_${uuidv4()}.mp4`);
         const dedupTempPath = path.join(os.tmpdir(), `dedup_${uuidv4()}.mp4`);
@@ -113,7 +117,13 @@ export async function processJob(jobId: number): Promise<void> {
 
         // 切片
         await clipVideo(videoPath, seg.startTime, seg.endTime, clipTempPath);
+
+        // 同步 job 状态到去重阶段
         await updateClip(clip.id, { status: "deduplicating" });
+        await updateJob(jobId, {
+          status: "deduplicating",
+          progress: baseProgress + Math.floor(15 / productSegments.length),
+        });
 
         // 去重处理（随机化参数，每个切片不同）
         const dedupOptions = {
@@ -125,14 +135,22 @@ export async function processJob(jobId: number): Promise<void> {
           mirror: false,
         };
         await deduplicateVideo(clipTempPath, dedupTempPath, dedupOptions);
-        await updateClip(clip.id, { status: "generating_copy" });
 
-        // LLM生成带货文案 + Hook文案
+        // 同步 job 状态到文案生成阶段
+        await updateClip(clip.id, { status: "generating_copy" });
+        await updateJob(jobId, {
+          status: "generating_copy",
+          progress: baseProgress + Math.floor(30 / productSegments.length),
+        });
+
+        // LLM生成带货文案 + Hook文案（支持 globalPrompt）
+        const globalPrompt = (job as any).globalPrompt || "";
         const copyData = await generateCopywriting(
           seg.productDescription,
           seg.keyPoints,
           job.productName || "",
-          job.productKeywords || ""
+          job.productKeywords || "",
+          globalPrompt
         );
 
         // 生成Hook文案
@@ -141,7 +159,8 @@ export async function processJob(jobId: number): Promise<void> {
           seg.productDescription,
           seg.keyPoints,
           job.productName || "",
-          hookStyle
+          hookStyle,
+          globalPrompt
         );
 
         // 将Hook文字叠加到去重后的视频开头
@@ -151,7 +170,6 @@ export async function processJob(jobId: number): Promise<void> {
           await addHookTextToVideo(dedupTempPath, hookTempPath, hookText, 4);
         } catch (hookErr) {
           console.warn(`[Job ${jobId}] Hook叠加失败，使用去重视频:`, hookErr);
-          // 如果Hook叠加失败，使用去重视频作为备用
           await fs.copyFile(dedupTempPath, hookTempPath);
         }
 
@@ -182,10 +200,13 @@ export async function processJob(jobId: number): Promise<void> {
           status: "completed",
         });
 
-        await updateJob(jobId, { progress: clipProgress });
+        // 更新整体进度
+        const overallProgress = 50 + Math.floor(((i + 1) / productSegments.length) * 45);
+        await updateJob(jobId, { progress: overallProgress });
       } catch (clipErr: any) {
         console.error(`[Job ${jobId}] 切片 ${i} 处理失败:`, clipErr);
         await updateClip(clip.id, { status: "failed" });
+        // 单个切片失败不中断整体流程，继续处理下一个
       }
     }
 
@@ -210,19 +231,23 @@ async function uploadTempFileToS3(filePath: string, key: string, contentType: st
 async function analyzeProductSegments(
   segments: TranscriptSegment[],
   productName: string,
-  productKeywords: string
+  productKeywords: string,
+  globalPrompt: string = ""
 ): Promise<ProductSegment[]> {
   if (segments.length === 0) return [];
 
-  // 将转录文本格式化为带时间戳的文本
   const transcriptText = segments
     .map((s) => `[${s.start.toFixed(1)}s-${s.end.toFixed(1)}s] ${s.text}`)
     .join("\n");
 
+  const globalPromptSection = globalPrompt
+    ? `\n全局限定词/特殊要求：${globalPrompt}`
+    : "";
+
   const prompt = `你是一个专业的电商直播视频剪辑助手。以下是一段服装直播的转录文本（带时间戳）。
 
 产品名称：${productName || "服装产品"}
-关键词/卖点：${productKeywords || "款式、材质、价格、穿搭"}
+关键词/卖点：${productKeywords || "款式、材质、价格、穿搭"}${globalPromptSection}
 
 转录文本：
 ${transcriptText}
@@ -285,7 +310,7 @@ ${transcriptText}
     });
 
     const rawContent = response.choices?.[0]?.message?.content;
-    const content = typeof rawContent === 'string' ? rawContent : null;
+    const content = typeof rawContent === "string" ? rawContent : null;
     if (!content) return getFallbackSegments(segments);
     const parsed = JSON.parse(content);
     return parsed.segments || getFallbackSegments(segments);
@@ -299,7 +324,7 @@ ${transcriptText}
 function getFallbackSegments(segments: TranscriptSegment[]): ProductSegment[] {
   if (segments.length === 0) return [];
   const totalDuration = segments[segments.length - 1].end;
-  const clipDuration = 45; // 45秒一段
+  const clipDuration = 45;
   const result: ProductSegment[] = [];
 
   for (let start = 0; start < totalDuration; start += clipDuration) {
@@ -316,29 +341,35 @@ function getFallbackSegments(segments: TranscriptSegment[]): ProductSegment[] {
   return result;
 }
 
-// LLM生成带货文案
+// LLM生成带货文案（支持 globalPrompt）
 async function generateCopywriting(
   productDescription: string,
   keyPoints: string[],
   productName: string,
-  productKeywords: string
+  productKeywords: string,
+  globalPrompt: string = ""
 ): Promise<{ title: string; copywriting: string; hashtags: string }> {
+  const globalSection = globalPrompt
+    ? `\n全局限定词/品牌要求：${globalPrompt}`
+    : "";
+
   const prompt = `你是一个专业的抖音电商带货文案写手，擅长写爆款短视频标题和带货文案。
 
 产品名称：${productName || "服装"}
 产品描述：${productDescription}
-核心卖点：${keyPoints.join("、") || productKeywords || "时尚、高品质"}
+核心卖点：${keyPoints.join("、") || productKeywords || "时尚、高品质"}${globalSection}
 
 请为这个短视频切片生成：
 1. 一个吸引人的抖音标题（20字以内，带数字或感叹词效果更好）
 2. 一段带货文案（100-150字，突出卖点，引导购买）
-3. 5-8个相关话题标签（#开头）
+3. 5-8个话题标签（混合热门和精准标签）
 
 注意：
 - 标题要有钩子，引发好奇或共鸣
 - 文案要口语化，符合抖音风格
 - 避免使用"最"、"第一"等绝对化用语
 - 话题标签要与服装、穿搭相关
+${globalPrompt ? "- 严格遵守全局限定词的要求" : ""}
 
 返回JSON格式：
 {
@@ -373,7 +404,7 @@ async function generateCopywriting(
     });
 
     const rawContent = response.choices?.[0]?.message?.content;
-    const content = typeof rawContent === 'string' ? rawContent : null;
+    const content = typeof rawContent === "string" ? rawContent : null;
     if (!content) return getDefaultCopy(productName);
     return JSON.parse(content);
   } catch (err) {
@@ -390,12 +421,13 @@ function getDefaultCopy(productName: string) {
   };
 }
 
-// LLM生成视频钩子文案
+// LLM生成视频钩子文案（支持 globalPrompt）
 async function generateHookText(
   productDescription: string,
   keyPoints: string[],
   productName: string,
-  hookStyle: string
+  hookStyle: string,
+  globalPrompt: string = ""
 ): Promise<string> {
   const styleGuide: Record<string, string> = {
     suspense: "悬念式：用疑问或反转制造好奇心，让人想继续看。例如：'这件衣服我穿上直接被问了10次在哪买？'",
@@ -404,13 +436,14 @@ async function generateHookText(
   };
 
   const guide = styleGuide[hookStyle] || styleGuide.suspense;
+  const globalSection = globalPrompt ? `\n品牌要求：${globalPrompt}` : "";
 
   const prompt = `你是抖音爆款短视频文案专家。请为以下产品视频生成一句开场钩子文案。
 
 产品名称：${productName || "服装"}
 产品描述：${productDescription}
 核心卖点：${keyPoints.join("、") || "时尚、高品质"}
-钩子风格：${guide}
+钩子风格：${guide}${globalSection}
 
 要求：
 1. 只输出一句话，不超过20个字
@@ -430,7 +463,6 @@ async function generateHookText(
     const rawContent = response.choices?.[0]?.message?.content;
     const content = typeof rawContent === "string" ? rawContent.trim() : null;
     if (!content) return getDefaultHook(productName, hookStyle);
-    // 清理多余标点和引号
     return content.replace(/^["'「」【】]|["'「」【】]$/g, "").trim().slice(0, 30);
   } catch (err) {
     console.error("[LLM] Hook文案生成失败:", err);

@@ -17,6 +17,7 @@ import {
   CheckCircle,
   AlertCircle,
   Zap,
+  Sparkles,
 } from "lucide-react";
 
 const ACCEPTED_TYPES = ["video/mp4", "video/quicktime", "video/x-msvideo", "video/avi", "video/mov", "video/webm"];
@@ -30,6 +31,13 @@ const HOOK_OPTIONS: { value: HookStyle; label: string; desc: string; example: st
   { value: "benefit", label: "利益式", desc: "突出性价比", example: "199元穿出千元质感！" },
 ];
 
+const GLOBAL_PROMPT_EXAMPLES = [
+  "高端女装品牌，文案要优雅大气，不要使用低价、便宜等词语",
+  "面向18-25岁年轻女生，风格活泼可爱，多用流行语和表情符号",
+  "主打性价比，突出折扣力度，语气要有紧迫感",
+  "小众设计师品牌，强调独特性和设计感，避免大众化表达",
+];
+
 export default function Upload() {
   const [, navigate] = useLocation();
   const { isAuthenticated } = useAuth();
@@ -38,11 +46,24 @@ export default function Upload() {
   const [productName, setProductName] = useState("");
   const [productKeywords, setProductKeywords] = useState("");
   const [hookStyle, setHookStyle] = useState<HookStyle>("suspense");
+  const [globalPrompt, setGlobalPrompt] = useState(() =>
+    localStorage.getItem("livestream_clipper_brand_persona") || ""
+  );
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const getUploadUrlMutation = trpc.jobs.getUploadUrl.useMutation();
+
+  // 从数据库同步品牌人设到全局提示词输入框
+  trpc.agent.getBrandPersona.useQuery(undefined, {
+    enabled: isAuthenticated,
+    onSuccess: (data: { brandPersona: string }) => {
+      if (data.brandPersona && !globalPrompt) {
+        setGlobalPrompt(data.brandPersona);
+      }
+    },
+  } as any);
 
   const validateFile = (f: File): string | null => {
     if (!ACCEPTED_TYPES.includes(f.type) && !f.name.match(/\.(mp4|mov|avi|webm|mkv)$/i)) {
@@ -78,13 +99,14 @@ export default function Upload() {
     setUploadProgress(0);
 
     try {
-      // 1. 创建任务（传入hookStyle）
+      // 1. 创建任务（传入 hookStyle 和 globalPrompt）
       const { jobId } = await getUploadUrlMutation.mutateAsync({
         fileName: file.name,
         fileSize: file.size,
         productName,
         productKeywords,
         hookStyle,
+        globalPrompt: globalPrompt.trim() || undefined,
       });
 
       // 2. 上传视频到服务器（流式）
@@ -242,7 +264,7 @@ export default function Upload() {
 
         {/* 产品信息 */}
         <div className="bg-card border border-border rounded-xl p-6 mb-6 space-y-4">
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex items-center gap-2 mb-2">
             <Tag className="w-4 h-4 text-primary" />
             <h2 className="font-semibold text-foreground">产品信息（可选，帮助AI更精准识别）</h2>
           </div>
@@ -273,6 +295,50 @@ export default function Upload() {
               className="bg-input border-border text-foreground placeholder:text-muted-foreground resize-none"
             />
           </div>
+        </div>
+
+        {/* 全局提示词 / 品牌人设 */}
+        <div className="bg-card border border-border rounded-xl p-6 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <Sparkles className="w-4 h-4 text-purple-400" />
+            <h2 className="font-semibold text-foreground">全局提示词（可选）</h2>
+            <span className="text-xs text-muted-foreground">影响本次任务所有切片的文案风格</span>
+          </div>
+
+          <Textarea
+            placeholder="描述你的品牌风格、禁用词、特殊要求等..."
+            value={globalPrompt}
+            onChange={(e) => setGlobalPrompt(e.target.value)}
+            disabled={uploading}
+            rows={3}
+            className="bg-input border-border text-foreground placeholder:text-muted-foreground resize-none mb-3"
+          />
+
+          {/* 快速示例 */}
+          <div>
+            <p className="text-xs text-muted-foreground mb-2">快速填入示例：</p>
+            <div className="flex flex-wrap gap-1.5">
+              {GLOBAL_PROMPT_EXAMPLES.map((example, i) => (
+                <button
+                  key={i}
+                  onClick={() => setGlobalPrompt(example)}
+                  disabled={uploading}
+                  className="text-xs px-2.5 py-1 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20 hover:border-purple-500/50 transition-colors"
+                >
+                  {example.slice(0, 12)}...
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {globalPrompt && (
+            <div className="mt-3 p-3 rounded-lg bg-purple-500/10 border border-purple-500/20">
+              <p className="text-xs text-purple-300 flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3" />
+                AI 将在生成文案时遵循此提示词
+              </p>
+            </div>
+          )}
         </div>
 
         {/* 上传进度 */}

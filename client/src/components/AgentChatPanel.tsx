@@ -1,9 +1,9 @@
 /**
- * AI 智能体悬浮对话框
+ * AI 智能体悬浮对话框（v2.0）
  * - 右下角悬浮按钮，点击展开侧边对话面板
- * - 支持自然语言指令（设置品牌人设、限定词、风格偏好）
+ * - 使用 SSE 流式输出，AI 回复实时逐字显示
+ * - 品牌人设持久化到数据库，跨设备同步
  * - 支持上下文感知（当前任务信息）
- * - 品牌人设设置后持久化到 localStorage
  */
 import { useState, useRef, useEffect, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
@@ -21,6 +21,7 @@ import {
   User,
   Settings,
   ChevronDown,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,6 +30,7 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   timestamp: Date;
+  streaming?: boolean;
 };
 
 type JobContext = {
@@ -42,7 +44,6 @@ type Props = {
   onBrandPersonaChange?: (persona: string) => void;
 };
 
-const STORAGE_KEY = "livestream_clipper_brand_persona";
 const CHAT_HISTORY_KEY = "livestream_clipper_chat_history";
 
 const QUICK_PROMPTS = [
@@ -74,15 +75,24 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
   });
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [brandPersona, setBrandPersona] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEY) || "";
-  });
+  const [brandPersona, setBrandPersona] = useState<string>("");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  const chatMutation = trpc.agent.chat.useMutation();
   const parseGlobalMutation = trpc.agent.parseGlobalInstruction.useMutation();
+  const clearBrandPersonaMutation = trpc.agent.clearBrandPersona.useMutation();
+
+  // 从数据库加载品牌人设
+  const { data: brandPersonaData } = trpc.agent.getBrandPersona.useQuery(undefined, {
+    onSuccess: (data) => {
+      if (data.brandPersona) {
+        setBrandPersona(data.brandPersona);
+        onBrandPersonaChange?.(data.brandPersona);
+      }
+    },
+  } as any);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -93,20 +103,25 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
 
   // 持久化聊天历史（最多保留20条）
   useEffect(() => {
-    const toSave = messages.slice(-20);
+    const toSave = messages.filter((m) => !m.streaming).slice(-20);
     localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(toSave));
   }, [messages]);
 
-  const addMessage = useCallback((role: "user" | "assistant", content: string) => {
+  const addMessage = useCallback((role: "user" | "assistant", content: string, streaming = false): string => {
+    const id = `${Date.now()}-${Math.random()}`;
     setMessages((prev) => [
       ...prev,
-      {
-        id: `${Date.now()}-${Math.random()}`,
-        role,
-        content,
-        timestamp: new Date(),
-      },
+      { id, role, content, timestamp: new Date(), streaming },
     ]);
+    return id;
+  }, []);
+
+  const updateStreamingMessage = useCallback((id: string, content: string, done = false) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === id ? { ...m, content, streaming: !done } : m
+      )
+    );
   }, []);
 
   const handleSend = async () => {
@@ -128,48 +143,111 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
         text.includes("定位");
 
       if (isSettingInstruction) {
-        // 解析全局指令
+        // 解析全局指令并持久化到数据库
         const parsed = await parseGlobalMutation.mutateAsync({ message: text });
 
-        // 保存品牌人设
         if (parsed.brandPersona) {
           setBrandPersona(parsed.brandPersona);
-          localStorage.setItem(STORAGE_KEY, parsed.brandPersona);
           onBrandPersonaChange?.(parsed.brandPersona);
         }
 
         const styleStr = parsed.styleKeywords.length > 0 ? `\n• 风格词：${parsed.styleKeywords.join("、")}` : "";
         const excludeStr = parsed.excludeKeywords.length > 0 ? `\n• 禁用词：${parsed.excludeKeywords.join("、")}` : "";
-        addMessage("assistant", `✅ ${parsed.summary}\n\n**已保存的品牌设置：**\n• 人设：${parsed.brandPersona || "通用"}${styleStr}${excludeStr}`);
+        addMessage(
+          "assistant",
+          `✅ ${parsed.summary}\n\n**已保存的品牌设置：**\n• 人设：${parsed.brandPersona || "通用"}${styleStr}${excludeStr}\n\n_设置已同步到云端，换设备也能使用。_`
+        );
       } else {
-        // 普通对话
+        // 使用 SSE 流式对话
+        const streamMsgId = addMessage("assistant", "", true);
+
         const historyMessages = messages
-          .filter((m) => m.id !== "welcome")
+          .filter((m) => m.id !== "welcome" && !m.streaming)
           .slice(-8)
           .map((m) => ({ role: m.role, content: m.content }));
 
         historyMessages.push({ role: "user", content: text });
 
-        const result = await chatMutation.mutateAsync({
-          messages: historyMessages,
-          brandPersona: brandPersona || undefined,
-          jobContext: jobContext
-            ? {
-                productName: jobContext.productName,
-                productKeywords: jobContext.productKeywords,
-                clipCount: jobContext.clipCount,
-              }
-            : undefined,
+        abortControllerRef.current = new AbortController();
+
+        const response = await fetch("/api/agent/chat/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            messages: historyMessages,
+            brandPersona: brandPersona || undefined,
+            jobContext: jobContext
+              ? {
+                  productName: jobContext.productName,
+                  productKeywords: jobContext.productKeywords,
+                  clipCount: jobContext.clipCount,
+                }
+              : undefined,
+          }),
+          signal: abortControllerRef.current.signal,
         });
 
-        addMessage("assistant", result.reply);
+        if (!response.ok) {
+          throw new Error("AI助手请求失败");
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("无法读取响应流");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let accumulated = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data: ")) continue;
+
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+              if (data.error) {
+                throw new Error(data.error);
+              }
+              if (data.done) {
+                updateStreamingMessage(streamMsgId, accumulated, true);
+                break;
+              }
+              if (data.content) {
+                accumulated += data.content;
+                updateStreamingMessage(streamMsgId, accumulated, false);
+              }
+            } catch (parseErr) {
+              // 忽略解析错误
+            }
+          }
+        }
+
+        // 确保最终状态正确
+        if (accumulated) {
+          updateStreamingMessage(streamMsgId, accumulated, true);
+        }
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === "AbortError") return;
       addMessage("assistant", "抱歉，AI助手暂时无法响应，请稍后再试。");
       toast.error("AI助手请求失败");
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
+  };
+
+  const handleStop = () => {
+    abortControllerRef.current?.abort();
+    setIsLoading(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -184,11 +262,28 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
     inputRef.current?.focus();
   };
 
-  const clearBrandPersona = () => {
-    setBrandPersona("");
-    localStorage.removeItem(STORAGE_KEY);
-    onBrandPersonaChange?.("");
-    toast.success("品牌人设已清除");
+  const handleClearBrandPersona = async () => {
+    try {
+      await clearBrandPersonaMutation.mutateAsync();
+      setBrandPersona("");
+      onBrandPersonaChange?.("");
+      toast.success("品牌人设已清除");
+    } catch {
+      toast.error("清除失败，请重试");
+    }
+  };
+
+  const handleClearHistory = () => {
+    setMessages([
+      {
+        id: "welcome",
+        role: "assistant",
+        content: "聊天记录已清除。有什么可以帮你的？",
+        timestamp: new Date(),
+      },
+    ]);
+    localStorage.removeItem(CHAT_HISTORY_KEY);
+    toast.success("聊天记录已清除");
   };
 
   const panelWidth = isExpanded ? "w-[480px]" : "w-[360px]";
@@ -200,7 +295,7 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
-          className="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-3 rounded-full bg-blue-600 hover:bg-blue-500 text-white shadow-2xl shadow-blue-900/50 transition-all duration-200 hover:scale-105 group"
+          className="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-3 rounded-full bg-blue-600 hover:bg-blue-500 text-white shadow-2xl shadow-blue-900/50 transition-all duration-200 hover:scale-105"
         >
           <Bot className="w-5 h-5" />
           <span className="text-sm font-medium">AI助手</span>
@@ -223,7 +318,7 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
               </div>
               <div>
                 <p className="text-sm font-semibold text-white">AI 智能助手</p>
-                <p className="text-xs text-gray-400">DeepSeek · 电商文案专家</p>
+                <p className="text-xs text-gray-400">DeepSeek · 流式输出</p>
               </div>
             </div>
             <div className="flex items-center gap-1">
@@ -233,6 +328,13 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
                   人设已设置
                 </Badge>
               )}
+              <button
+                onClick={handleClearHistory}
+                className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                title="清除聊天记录"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
               <button
                 onClick={() => setIsExpanded(!isExpanded)}
                 className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
@@ -256,7 +358,7 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
                 <span className="text-xs text-green-300 truncate">{brandPersona}</span>
               </div>
               <button
-                onClick={clearBrandPersona}
+                onClick={handleClearBrandPersona}
                 className="text-xs text-gray-500 hover:text-red-400 transition-colors shrink-0 ml-2"
               >
                 清除
@@ -290,28 +392,34 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
                         : "bg-gray-800 text-gray-100 rounded-tl-sm"
                     }`}
                   >
-                    {msg.content.split("\n").map((line, i) => {
-                      // 简单的 markdown bold 渲染
-                      const parts = line.split(/\*\*(.*?)\*\*/g);
-                      return (
-                        <p key={i} className={i > 0 ? "mt-1" : ""}>
-                          {parts.map((part, j) =>
-                            j % 2 === 1 ? (
-                              <strong key={j} className="font-semibold">
-                                {part}
-                              </strong>
-                            ) : (
-                              part
-                            )
-                          )}
-                        </p>
-                      );
-                    })}
+                    {msg.content ? (
+                      msg.content.split("\n").map((line, i) => {
+                        const parts = line.split(/\*\*(.*?)\*\*/g);
+                        return (
+                          <p key={i} className={i > 0 ? "mt-1" : ""}>
+                            {parts.map((part, j) =>
+                              j % 2 === 1 ? (
+                                <strong key={j} className="font-semibold">
+                                  {part}
+                                </strong>
+                              ) : (
+                                part
+                              )
+                            )}
+                          </p>
+                        );
+                      })
+                    ) : (
+                      <span className="text-gray-500 italic text-xs">思考中...</span>
+                    )}
+                    {msg.streaming && (
+                      <span className="inline-block w-1.5 h-4 bg-gray-400 ml-0.5 animate-pulse rounded-sm" />
+                    )}
                   </div>
                 </div>
               ))}
 
-              {isLoading && (
+              {isLoading && !messages.some((m) => m.streaming) && (
                 <div className="flex gap-2">
                   <div className="w-7 h-7 rounded-full bg-purple-700 flex items-center justify-center shrink-0">
                     <Bot className="w-3.5 h-3.5 text-white" />
@@ -360,18 +468,30 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
                 placeholder="输入指令，如：设置高端女装风格..."
                 className="flex-1 min-h-[40px] max-h-[120px] resize-none bg-gray-800 border-gray-700 text-white placeholder:text-gray-500 text-sm rounded-xl focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 rows={1}
+                disabled={isLoading}
               />
-              <Button
-                onClick={handleSend}
-                disabled={!input.trim() || isLoading}
-                size="sm"
-                className="h-10 w-10 p-0 rounded-xl bg-blue-600 hover:bg-blue-500 shrink-0"
-              >
-                <Send className="w-4 h-4" />
-              </Button>
+              {isLoading ? (
+                <Button
+                  onClick={handleStop}
+                  size="sm"
+                  className="h-10 w-10 p-0 rounded-xl bg-red-600 hover:bg-red-500 shrink-0"
+                  title="停止生成"
+                >
+                  <X className="w-4 h-4" />
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleSend}
+                  disabled={!input.trim()}
+                  size="sm"
+                  className="h-10 w-10 p-0 rounded-xl bg-blue-600 hover:bg-blue-500 shrink-0"
+                >
+                  <Send className="w-4 h-4" />
+                </Button>
+              )}
             </div>
             <p className="text-xs text-gray-600 mt-1.5 text-center">
-              Enter 发送 · Shift+Enter 换行
+              Enter 发送 · Shift+Enter 换行{isLoading ? " · 点击红色按钮停止" : ""}
             </p>
           </div>
         </div>

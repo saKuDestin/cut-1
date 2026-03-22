@@ -8,8 +8,10 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { ENV } from "./env";
-import { updateJob, getJobById, getClipsByJobId } from "../db";
+import { updateJob, getJobById, getClipsByJobId, getUserById } from "../db";
 import { processJob } from "../jobProcessor";
+import { enqueueJob, getActiveJobCount, getWaitingQueueLength } from "../jobQueue";
+import { callDeepSeekStream } from "../agentService";
 import archiver from "archiver";
 import { sdk } from "./sdk";
 import FormData from "form-data";
@@ -34,8 +36,7 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
 
-  // 增加超时时间（大文件上传需要）
-  server.timeout = 30 * 60 * 1000; // 30分钟
+  server.timeout = 30 * 60 * 1000;
   server.keepAliveTimeout = 30 * 60 * 1000;
 
   app.use(express.json({ limit: "10mb" }));
@@ -45,7 +46,6 @@ async function startServer() {
 
   // ===== 视频上传接口（流式上传到S3，不缓冲到内存）=====
   app.post("/api/upload/:jobId", async (req, res) => {
-    // 设置超时
     req.setTimeout(30 * 60 * 1000);
     res.setTimeout(30 * 60 * 1000);
 
@@ -56,7 +56,6 @@ async function startServer() {
         return;
       }
 
-      // 验证用户session
       let user = null;
       try { user = await sdk.authenticateRequest(req as any); } catch {}
       if (!user) {
@@ -71,7 +70,6 @@ async function startServer() {
       }
 
       const contentType = (req.headers["content-type"] as string)?.split(";")[0] || "video/mp4";
-      // 解码URI编码的文件名（前端使用encodeURIComponent避免中文字符问题）
       const rawFileName = (req.headers["x-file-name"] as string) || "video.mp4";
       const fileName = (() => { try { return decodeURIComponent(rawFileName); } catch { return rawFileName; } })();
       const ext = fileName.split(".").pop()?.toLowerCase() || "mp4";
@@ -81,7 +79,6 @@ async function startServer() {
       const forgeApiKey = ENV.forgeApiKey;
       const uploadUrl = `${forgeBaseUrl}/v1/storage/upload?path=${encodeURIComponent(key)}`;
 
-      // 使用form-data流式转发（不缓冲到内存）
       const form = new FormData();
       form.append("file", req, {
         filename: fileName,
@@ -101,7 +98,7 @@ async function startServer() {
         },
         body: form,
         // @ts-ignore
-        timeout: 25 * 60 * 1000, // 25分钟超时
+        timeout: 25 * 60 * 1000,
       });
 
       if (!uploadResponse.ok) {
@@ -123,8 +120,8 @@ async function startServer() {
         progress: 5,
       });
 
-      // 异步启动处理（不等待）
-      processJob(jobId).catch((err) => {
+      // 通过队列控制并发
+      enqueueJob(jobId, processJob).catch((err) => {
         console.error(`[Job ${jobId}] 处理失败:`, err);
         updateJob(jobId, { status: "failed", errorMessage: err.message });
       });
@@ -144,7 +141,6 @@ async function startServer() {
       const jobId = parseInt(req.params.jobId);
       if (isNaN(jobId)) { res.status(400).json({ error: "Invalid jobId" }); return; }
 
-      // 验证用户session
       let user = null;
       try { user = await sdk.authenticateRequest(req as any); } catch {}
       if (!user) { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -159,16 +155,13 @@ async function startServer() {
         res.status(400).json({ error: "没有已完成的切片" }); return;
       }
 
-      // 设置响应头
       const zipName = `clips_job${jobId}_${Date.now()}.zip`;
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("Content-Disposition", `attachment; filename="${zipName}"`);
 
-      // 创建ZIP流
       const archive = archiver("zip", { zlib: { level: 6 } });
       archive.pipe(res);
 
-      // 生成文案汇总TXT
       const copyText = completedClips
         .map((c, i) => [
           `===== 切片 ${i + 1} =====`,
@@ -182,27 +175,23 @@ async function startServer() {
         .join("\n");
       archive.append(Buffer.from(copyText, "utf-8"), { name: "all_copywriting.txt" });
 
-      // 并行下载所有视频和字幕并加入ZIP
       const { default: nodeFetch } = await import("node-fetch");
       await Promise.all(
         completedClips.map(async (clip, i) => {
           const idx = String(i + 1).padStart(2, "0");
           try {
-            // 视频文件
             if (clip.videoUrl) {
               const vRes = await nodeFetch(clip.videoUrl);
               if (vRes.ok && vRes.body) {
                 archive.append(vRes.body as any, { name: `clip_${idx}.mp4` });
               }
             }
-            // 字幕文件
             if (clip.srtUrl) {
               const sRes = await nodeFetch(clip.srtUrl);
               if (sRes.ok && sRes.body) {
                 archive.append(sRes.body as any, { name: `clip_${idx}.srt` });
               }
             }
-            // 单个切片文案TXT
             const singleCopy = [
               `标题：${clip.title || ""}`,
               `文案：${clip.copywriting || ""}`,
@@ -221,6 +210,97 @@ async function startServer() {
       console.error("[ZIP] 打包失败:", err);
       if (!res.headersSent) res.status(500).json({ error: err.message || "打包失败" });
     }
+  });
+
+  // ===== SSE 流式 AI 对话接口 =====
+  app.post("/api/agent/chat/stream", async (req, res) => {
+    try {
+      let user = null;
+      try { user = await sdk.authenticateRequest(req as any); } catch {}
+      if (!user) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+      const { messages, brandPersona: inputPersona, jobContext } = req.body as {
+        messages: Array<{ role: "user" | "assistant"; content: string }>;
+        brandPersona?: string;
+        jobContext?: { productName?: string; productKeywords?: string; clipCount?: number };
+      };
+
+      if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        res.status(400).json({ error: "messages 不能为空" });
+        return;
+      }
+
+      // 优先使用传入的，其次从数据库读取
+      let brandPersona = inputPersona;
+      if (!brandPersona) {
+        const dbUser = await getUserById(user.id);
+        brandPersona = dbUser?.brandPersona || undefined;
+      }
+
+      let systemPrompt = `你是直播切片大师的AI助手，专门帮助电商服装商家优化短视频内容。
+
+你可以帮助用户：
+1. 设置品牌人设和文案风格偏好
+2. 解释如何使用各种功能
+3. 根据用户描述，给出具体的文案优化建议
+4. 分析产品卖点，提供内容策略建议
+5. 回答关于短视频运营的问题`;
+
+      if (brandPersona) {
+        systemPrompt += `\n\n【当前品牌人设】：${brandPersona}`;
+      }
+
+      if (jobContext) {
+        systemPrompt += `\n\n【当前任务信息】：产品：${jobContext.productName || "服装"}，卖点：${jobContext.productKeywords || "未设置"}，切片数量：${jobContext.clipCount ?? 0}个`;
+      }
+
+      // 设置 SSE 响应头
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+
+      const agentMessages = messages.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+
+      try {
+        for await (const chunk of callDeepSeekStream(agentMessages, systemPrompt)) {
+          if (res.writableEnded) break;
+          res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+        }
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+          res.end();
+        }
+      } catch (streamErr: any) {
+        console.error("[SSE] 流式对话失败:", streamErr);
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ error: streamErr.message || "AI响应失败" })}\n\n`);
+          res.end();
+        }
+      }
+    } catch (err: any) {
+      console.error("[SSE] 接口异常:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || "服务器错误" });
+      }
+    }
+  });
+
+  // ===== 队列状态查询接口 =====
+  app.get("/api/queue/status", async (req, res) => {
+    let user = null;
+    try { user = await sdk.authenticateRequest(req as any); } catch {}
+    if (!user) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+    res.json({
+      activeJobs: getActiveJobCount(),
+      waitingJobs: getWaitingQueueLength(),
+      maxConcurrent: 2,
+    });
   });
 
   // tRPC API
