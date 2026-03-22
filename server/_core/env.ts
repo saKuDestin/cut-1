@@ -11,7 +11,7 @@ export const ENV = {
   // AWS S3 / 兼容 S3 协议的对象存储
   s3AccessKeyId: process.env.S3_ACCESS_KEY_ID ?? "",
   s3SecretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "",
-  s3Bucket: process.env.S3_BUCKET ?? "",
+  s3Bucket: process.env.S3_BUCKET ?? process.env.S3_BUCKET_NAME ?? "",
   s3Region: process.env.S3_REGION ?? "us-east-1",
   s3Endpoint: process.env.S3_ENDPOINT ?? "",  // 可选：自定义 endpoint（阿里云/腾讯云/R2/MinIO）
 

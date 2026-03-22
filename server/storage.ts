@@ -30,7 +30,10 @@ function getS3Client(): S3Client {
   // 支持自定义 endpoint（阿里云 OSS、腾讯云 COS、Cloudflare R2、MinIO 等）
   if (ENV.s3Endpoint) {
     config.endpoint = ENV.s3Endpoint;
-    config.forcePathStyle = true; // MinIO 等需要路径风格
+    // Cloudflare R2 使用虚拟主机风格，MinIO 等使用路径风格
+    // R2 endpoint 包含账户 ID，不需要 forcePathStyle
+    const isR2 = ENV.s3Endpoint.includes(".r2.cloudflarestorage.com");
+    config.forcePathStyle = !isR2;
   }
 
   return new S3Client(config);
