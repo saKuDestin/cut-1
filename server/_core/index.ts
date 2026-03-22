@@ -3,19 +3,16 @@ import express from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
+import { registerAuthRoutes, authenticateRequest } from "./auth";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { ENV } from "./env";
 import { updateJob, getJobById, getClipsByJobId, getUserById } from "../db";
 import { processJob } from "../jobProcessor";
 import { enqueueJob, getActiveJobCount, getWaitingQueueLength } from "../jobQueue";
 import { callDeepSeekStream } from "../agentService";
+import { storagePut } from "../storage";
 import archiver from "archiver";
-import { sdk } from "./sdk";
-import FormData from "form-data";
-import fetch from "node-fetch";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -42,9 +39,10 @@ async function startServer() {
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-  registerOAuthRoutes(app);
+  // 注册账号密码认证路由（注册/登录/登出/me）
+  registerAuthRoutes(app);
 
-  // ===== 视频上传接口（流式上传到S3，不缓冲到内存）=====
+  // ===== 视频上传接口（流式上传到 AWS S3）=====
   app.post("/api/upload/:jobId", async (req, res) => {
     req.setTimeout(30 * 60 * 1000);
     res.setTimeout(30 * 60 * 1000);
@@ -57,7 +55,7 @@ async function startServer() {
       }
 
       let user = null;
-      try { user = await sdk.authenticateRequest(req as any); } catch {}
+      try { user = await authenticateRequest(req as any); } catch {}
       if (!user) {
         res.status(401).json({ error: "Unauthorized" });
         return;
@@ -75,43 +73,22 @@ async function startServer() {
       const ext = fileName.split(".").pop()?.toLowerCase() || "mp4";
       const key = `uploads/${user.id}/${jobId}/video.${ext}`;
 
-      const forgeBaseUrl = ENV.forgeApiUrl.replace(/\/+$/, "");
-      const forgeApiKey = ENV.forgeApiKey;
-      const uploadUrl = `${forgeBaseUrl}/v1/storage/upload?path=${encodeURIComponent(key)}`;
+      console.log(`[Upload] Job ${jobId}: 开始接收视频流, key=${key}`);
 
-      const form = new FormData();
-      form.append("file", req, {
-        filename: fileName,
-        contentType: contentType,
-        knownLength: req.headers["content-length"]
-          ? parseInt(req.headers["content-length"])
-          : undefined,
+      // 将请求体读取为 Buffer 后上传到 S3
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", resolve);
+        req.on("error", reject);
       });
 
-      console.log(`[Upload] Job ${jobId}: 开始流式上传到S3, key=${key}`);
+      const videoBuffer = Buffer.concat(chunks);
+      console.log(`[Upload] Job ${jobId}: 接收完成 ${(videoBuffer.length / 1024 / 1024).toFixed(1)}MB，上传到S3...`);
 
-      const uploadResponse = await fetch(uploadUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${forgeApiKey}`,
-          ...form.getHeaders(),
-        },
-        body: form,
-        // @ts-ignore
-        timeout: 25 * 60 * 1000,
-      });
+      const { url: videoUrl } = await storagePut(key, videoBuffer, contentType);
 
-      if (!uploadResponse.ok) {
-        const errText = await uploadResponse.text();
-        console.error(`[Upload] S3上传失败: ${uploadResponse.status} ${errText}`);
-        res.status(500).json({ error: `上传失败: ${errText}` });
-        return;
-      }
-
-      const uploadResult = await uploadResponse.json() as { url: string };
-      const videoUrl = uploadResult.url;
-
-      console.log(`[Upload] Job ${jobId}: 上传成功, url=${videoUrl}`);
+      console.log(`[Upload] Job ${jobId}: S3上传成功`);
 
       await updateJob(jobId, {
         originalVideoUrl: videoUrl,
@@ -142,7 +119,7 @@ async function startServer() {
       if (isNaN(jobId)) { res.status(400).json({ error: "Invalid jobId" }); return; }
 
       let user = null;
-      try { user = await sdk.authenticateRequest(req as any); } catch {}
+      try { user = await authenticateRequest(req as any); } catch {}
       if (!user) { res.status(401).json({ error: "Unauthorized" }); return; }
 
       const job = await getJobById(jobId);
@@ -216,7 +193,7 @@ async function startServer() {
   app.post("/api/agent/chat/stream", async (req, res) => {
     try {
       let user = null;
-      try { user = await sdk.authenticateRequest(req as any); } catch {}
+      try { user = await authenticateRequest(req as any); } catch {}
       if (!user) { res.status(401).json({ error: "Unauthorized" }); return; }
 
       const { messages, brandPersona: inputPersona, jobContext } = req.body as {
@@ -293,7 +270,7 @@ async function startServer() {
   // ===== 队列状态查询接口 =====
   app.get("/api/queue/status", async (req, res) => {
     let user = null;
-    try { user = await sdk.authenticateRequest(req as any); } catch {}
+    try { user = await authenticateRequest(req as any); } catch {}
     if (!user) { res.status(401).json({ error: "Unauthorized" }); return; }
 
     res.json({

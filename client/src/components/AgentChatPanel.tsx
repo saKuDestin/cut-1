@@ -85,14 +85,13 @@ export default function AgentChatPanel({ jobContext, onBrandPersonaChange }: Pro
   const clearBrandPersonaMutation = trpc.agent.clearBrandPersona.useMutation();
 
   // 从数据库加载品牌人设
-  const { data: brandPersonaData } = trpc.agent.getBrandPersona.useQuery(undefined, {
-    onSuccess: (data) => {
-      if (data.brandPersona) {
-        setBrandPersona(data.brandPersona);
-        onBrandPersonaChange?.(data.brandPersona);
-      }
-    },
-  } as any);
+  const { data: brandPersonaData } = trpc.agent.getBrandPersona.useQuery();
+  useEffect(() => {
+    if (brandPersonaData?.brandPersona) {
+      setBrandPersona(brandPersonaData.brandPersona);
+      onBrandPersonaChange?.(brandPersonaData.brandPersona);
+    }
+  }, [brandPersonaData]);
 
   // 自动滚动到底部
   useEffect(() => {

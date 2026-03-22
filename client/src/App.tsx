@@ -9,11 +9,15 @@ import Upload from "./pages/Upload";
 import Processing from "./pages/Processing";
 import Results from "./pages/Results";
 import History from "./pages/History";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/login" component={Login} />
+      <Route path="/register" component={Register} />
       <Route path="/upload" component={Upload} />
       <Route path="/processing/:jobId" component={Processing} />
       <Route path="/results/:jobId" component={Results} />

@@ -1,11 +1,28 @@
 export const ENV = {
-  appId: process.env.VITE_APP_ID ?? "",
-  cookieSecret: process.env.JWT_SECRET ?? "",
+  // 应用基础配置
+  cookieSecret: process.env.JWT_SECRET ?? "change-me-in-production-use-random-string",
   databaseUrl: process.env.DATABASE_URL ?? "",
-  oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
-  ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   isProduction: process.env.NODE_ENV === "production",
-  forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
-  forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+
+  // AI 服务
   deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? "",
+  groqApiKey: process.env.GROQ_API_KEY ?? "",
+
+  // AWS S3 / 兼容 S3 协议的对象存储
+  s3AccessKeyId: process.env.S3_ACCESS_KEY_ID ?? "",
+  s3SecretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "",
+  s3Bucket: process.env.S3_BUCKET ?? "",
+  s3Region: process.env.S3_REGION ?? "us-east-1",
+  s3Endpoint: process.env.S3_ENDPOINT ?? "",  // 可选：自定义 endpoint（阿里云/腾讯云/R2/MinIO）
+
+  // 管理员账号（首次部署时用于创建管理员）
+  adminEmail: process.env.ADMIN_EMAIL ?? "",
+  adminPassword: process.env.ADMIN_PASSWORD ?? "",
+
+  // 以下为兼容旧代码保留，不再使用
+  appId: "",
+  oAuthServerUrl: "",
+  ownerOpenId: "",
+  forgeApiUrl: "",
+  forgeApiKey: "",
 };
