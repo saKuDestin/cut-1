@@ -1,0 +1,20 @@
+{
+  "query": "SELECT id, status, progress, totalClips, errorMessage FROM jobs WHERE id=4;\nSELECT id, status, title FROM clips WHERE jobId=4;\nSELECT id, language FROM transcripts WHERE jobId=4;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3s6nDyjGJfykhYQ.57e2327286de --database bbWaxKNZwvSQFQVdToiEvu --execute SELECT id, status, progress, totalClips, errorMessage FROM jobs WHERE id=4;\nSELECT id, status, title FROM clips WHERE jobId=4;\nSELECT id, language FROM transcripts WHERE jobId=4;",
+  "rows": [
+    {
+      "id": "4",
+      "status": "completed",
+      "progress": "100",
+      "totalClips": "0",
+      "errorMessage": "NULL"
+    }
+  ],
+  "messages": [
+    "id\tlanguage",
+    "3\tchinese"
+  ],
+  "stdout": "id\tstatus\tprogress\ttotalClips\terrorMessage\n4\tcompleted\t100\t0\tNULL\nid\tlanguage\n3\tchinese\n",
+  "stderr": "",
+  "execution_time_ms": 1999
+}

@@ -1,0 +1,9 @@
+{
+  "query": "ALTER TABLE `clips` ADD `hookText` text;\nALTER TABLE `jobs` ADD `hookStyle` enum('suspense','pain_point','benefit') DEFAULT 'suspense';",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3s6nDyjGJfykhYQ.57e2327286de --database bbWaxKNZwvSQFQVdToiEvu --execute ALTER TABLE `clips` ADD `hookText` text;\nALTER TABLE `jobs` ADD `hookStyle` enum('suspense','pain_point','benefit') DEFAULT 'suspense';",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 3536
+}

@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1773911160347,
+      "tag": "0000_acoustic_jack_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1773911344789,
+      "tag": "0001_fancy_wendell_rand",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1773915906533,
+      "tag": "0002_thin_zaladane",
+      "breakpoints": true
+    }
+  ]
+}
