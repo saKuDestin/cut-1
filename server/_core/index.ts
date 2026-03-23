@@ -86,13 +86,14 @@ async function startServer() {
       const videoBuffer = Buffer.concat(chunks);
       console.log(`[Upload] Job ${jobId}: 接收完成 ${(videoBuffer.length / 1024 / 1024).toFixed(1)}MB，上传到S3...`);
 
-      const { url: videoUrl } = await storagePut(key, videoBuffer, contentType);
+      await storagePut(key, videoBuffer, contentType);
 
       console.log(`[Upload] Job ${jobId}: S3上传成功`);
 
+      // 只保存稳定的 key，不写入带签名的临时 URL（presigned URL 过长且会过期）
       await updateJob(jobId, {
-        originalVideoUrl: videoUrl,
         originalVideoKey: key,
+        originalVideoUrl: null,
         status: "transcribing",
         progress: 5,
       });
@@ -103,7 +104,7 @@ async function startServer() {
         updateJob(jobId, { status: "failed", errorMessage: err.message });
       });
 
-      res.json({ success: true, videoUrl, jobId });
+      res.json({ success: true, jobId });
     } catch (err: any) {
       console.error("[Upload] 上传异常:", err);
       if (!res.headersSent) {

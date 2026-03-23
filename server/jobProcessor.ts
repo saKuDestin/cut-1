@@ -12,6 +12,7 @@ import {
   updateClip,
   getJobById,
 } from "./db";
+import { storageGet } from "./storage";
 import {
   extractAudio,
   clipVideo,
@@ -27,18 +28,19 @@ import {
 // 主任务处理入口
 export async function processJob(jobId: number): Promise<void> {
   const job = await getJobById(jobId);
-  if (!job || !job.originalVideoUrl) {
-    await updateJob(jobId, { status: "failed", errorMessage: "任务或视频URL不存在" });
+  if (!job || !job.originalVideoKey) {
+    await updateJob(jobId, { status: "failed", errorMessage: "任务或视频 Key 不存在" });
     return;
   }
 
   const tempFiles: string[] = [];
 
   try {
-    // === 阶段1：下载视频 ===
+    // === 阶段1：下载视频（动态生成 presigned URL，不依赖数据库中存储的 URL）===
     await updateJob(jobId, { status: "transcribing", progress: 5 });
-    console.log(`[Job ${jobId}] 下载视频: ${job.originalVideoUrl}`);
-    const videoPath = await downloadToTemp(job.originalVideoUrl, "mp4");
+    const { url: videoDownloadUrl } = await storageGet(job.originalVideoKey);
+    console.log(`[Job ${jobId}] 下载视频 key=${job.originalVideoKey}`);
+    const videoPath = await downloadToTemp(videoDownloadUrl, "mp4");
     tempFiles.push(videoPath);
 
     // === 阶段2：提取音频 ===

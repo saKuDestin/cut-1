@@ -184,7 +184,7 @@ export const appRouter = router({
         if (job.status !== "failed") {
           throw new TRPCError({ code: "BAD_REQUEST", message: "只有失败的任务才能重试" });
         }
-        if (!job.originalVideoUrl) {
+        if (!job.originalVideoKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "原始视频不存在，无法重试" });
         }
 
